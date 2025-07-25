@@ -1,9 +1,9 @@
 {
   "words": [
-    {"tamil": "பூ", "english": "flower", "image": "flower.png"},
-    {"tamil": "பால்", "english": "milk", "image": "milk.png"},
-    {"tamil": "நீர்", "english": "water", "image": "water.png"},
-    {"tamil": "சூரியன்", "english": "sun", "image": "sun.png"},
-    {"tamil": "நிலா", "english": "moon", "image": "moon.png"}
+    {"tamil": "பூ", "english": "flower"},
+    {"tamil": "பால்", "english": "milk"},
+    {"tamil": "நீர்", "english": "water"},
+    {"tamil": "சூரியன்", "english": "sun"},
+    {"tamil": "நிலா", "english": "moon"}
   ]
 }

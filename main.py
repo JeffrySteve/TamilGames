@@ -1,28 +1,37 @@
-# Entry point with webcam + menu
+# Entry point with GUI menu for Tamil Kids Learning Games
 
-import cv2
-from game_logic import game_drag_drop, game_finger_count
-def show_menu():
-    print("\n===== Tamil Kids Learning Games =====")
-    print("1) Drag-Drop Matching")
-    print("2) Finger Counting")
-    print("3) Air Tracing Tamil Letters")
-    print("4) Exit")
+import sys
+import tkinter as tk
 
 def main():
-    while True:
-        show_menu()
-        choice = input("Select a game (1-4): ")
-
-        if choice == '1':
-            game_drag_drop()
-        elif choice == '2':
-            game_finger_count()
-        elif choice == '4':
-            print("Exiting Tamil Kids Learning Games. Goodbye!")
-            break
-        else:
-            print("Invalid choice. Please select 1-4.")
+    try:
+        from gui_menu_simple import TamilGamesGUI
+        print("🚀 Starting Tamil Kids Learning Games...")
+        app = TamilGamesGUI()
+        
+        # Make sure the window is visible and focused
+        app.root.lift()
+        app.root.attributes('-topmost', True)
+        app.root.after_idle(lambda: app.root.attributes('-topmost', False))
+        app.root.focus_force()
+        
+        # Display initial instructions
+        print("💡 Tips:")
+        print("   - Press F11 to toggle fullscreen mode")
+        print("   - Press ESC to exit fullscreen")
+        print("   - Click 'Fullscreen Mode' button in menu")
+        print("   - Larger window provides better game experience!")
+        
+        app.run()
+    except ImportError as e:
+        print(f"❌ Error: Required modules not found - {e}")
+        print("Please install required packages: pip install opencv-python mediapipe pillow")
+        input("Press Enter to exit...")
+    except Exception as e:
+        print(f"❌ Error starting application: {e}")
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to exit...")
 
 if __name__ == "__main__":
     main()
