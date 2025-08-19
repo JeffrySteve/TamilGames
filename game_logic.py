@@ -19,6 +19,14 @@ class DragDropGame:
         self.score = 0
         self.matches_made = 0
         self.game_complete = False
+        # Interaction state (new)
+        self.hover_word = None
+        self.hover_counter = 0
+        self.dwell_frames_to_grab = 10  # frames required to grab
+        self.snap_radius = 60  # px radius to snap to nearest target
+        self.highlight_target_idx = None
+        self.drop_hover_counter = 0
+        self.drop_dwell_frames = 6  # frames to confirm drop over a target
         
     def load_words(self):
         try:
@@ -45,7 +53,8 @@ class DragDropGame:
                 'word': word,
                 'rect': (50, y, 200, 80),
                 'center': (150, y + 40),
-                'matched': False
+                'matched': False,
+                'mistakes': 0
             }
             self.word_boxes.append(box)
         
@@ -60,7 +69,8 @@ class DragDropGame:
                 'word': word,
                 'rect': (img_width - 250, y, 200, 80),
                 'center': (img_width - 150, y + 40),
-                'matched': False
+                'matched': False,
+                'highlight': False
             }
             self.image_boxes.append(box)
     
@@ -122,7 +132,8 @@ class DragDropGame:
                 bg_color = (0, 80, 0)
                 icon = "✓"
             else:
-                color = (100, 150, 255)
+                # Highlight nearest target when dragging
+                color = (0, 255, 255) if box.get('highlight', False) else (100, 150, 255)
                 bg_color = (50, 50, 80)
                 icon = "?"
             
@@ -239,6 +250,21 @@ class DragDropGame:
     def check_match(self, word_box, image_box):
         return word_box['word']['english'] == image_box['word']['english']
     
+    def get_nearest_target(self, pos):
+        """Return (index, box, distance) for nearest unmatched target center to pos"""
+        if not pos:
+            return None, None, float('inf')
+        px, py = pos
+        best_idx, best_box, best_dist = None, None, float('inf')
+        for idx, box in enumerate(self.image_boxes):
+            if box['matched']:
+                continue
+            cx, cy = box['center']
+            d = math.hypot(px - cx, py - cy)
+            if d < best_dist:
+                best_idx, best_box, best_dist = idx, box, d
+        return best_idx, best_box, best_dist
+    
     def handle_game_logic(self, img):
         finger_pos, is_grabbing, confidence = self.detect_finger_position(img)
         
@@ -265,38 +291,48 @@ class DragDropGame:
             # Display confidence
             draw_text(img, f"Confidence: {confidence:.1f}", (10, 30), (255, 255, 255), 0.5, 1)
             
-            if is_grabbing and not self.dragging and confidence > 0.7:  # Higher threshold for grabbing
-                # Start dragging
+            # Dwell-to-grab: require sustained grab over a word box
+            if not self.dragging:
                 word_box = self.check_word_collision(finger_pos)
-                if word_box:
-                    self.current_word = word_box
-                    self.dragging = True
-                    self.drag_offset = (finger_pos[0] - word_box['center'][0], 
-                                      finger_pos[1] - word_box['center'][1])
-                    # Visual feedback for grab
-                    cv2.circle(img, finger_pos, 25, (0, 255, 0), 3)
+                if word_box and not word_box['matched'] and is_grabbing and confidence > 0.7:
+                    if self.hover_word is word_box:
+                        self.hover_counter += 1
+                    else:
+                        self.hover_word = word_box
+                        self.hover_counter = 1
+                    # Visual dwell indicator
+                    cv2.circle(img, finger_pos, 20 + min(self.hover_counter, 10), (0, 180, 0), 2)
+                    if self.hover_counter >= self.dwell_frames_to_grab:
+                        self.current_word = word_box
+                        self.dragging = True
+                        self.drag_offset = (finger_pos[0] - word_box['center'][0], 
+                                          finger_pos[1] - word_box['center'][1])
+                        self.hover_word = None
+                        self.hover_counter = 0
+                else:
+                    self.hover_word = None
+                    self.hover_counter = 0
             
             elif not is_grabbing and self.dragging:
-                # Stop dragging and check for match
-                image_box = self.check_image_collision(finger_pos)
+                # Release: snap to nearest target if within radius, then validate
+                nearest_idx, nearest_box, nearest_dist = self.get_nearest_target(finger_pos)
+                if nearest_box and nearest_dist <= self.snap_radius:
+                    image_box = nearest_box
+                else:
+                    image_box = self.check_image_collision(finger_pos)
+
                 if image_box and self.check_match(self.current_word, image_box):
-                    # Successful match with visual effects!
                     self.current_word['matched'] = True
                     image_box['matched'] = True
                     self.score += 10
                     self.matches_made += 1
-                    
                     # Success visual effect
                     for i in range(3):
-                        cv2.circle(img, finger_pos, 30 + i*10, (0, 255, 0), 3)
-                    
-                    # Play success sound
+                        cv2.circle(img, image_box['center'], 30 + i*10, (0, 255, 0), 3)
                     try:
                         play_sound(f"Correct! {self.current_word['word']['tamil']}")
                     except:
                         print(f"Correct! {self.current_word['word']['tamil']}")
-                    
-                    # Check if game is complete
                     if self.matches_made >= len(self.word_boxes):
                         self.game_complete = True
                         try:
@@ -304,11 +340,11 @@ class DragDropGame:
                         except:
                             print("Game Complete!")
                 else:
-                    # Failed match - show red feedback
-                    if image_box:
-                        cv2.circle(img, finger_pos, 25, (0, 0, 255), 3)
-                        draw_text(img, "WRONG!", (finger_pos[0] - 25, finger_pos[1] - 40), (0, 0, 255), 0.6, 2)
-                
+                    # Failed match: feedback and track mistakes
+                    if self.current_word is not None:
+                        self.current_word['mistakes'] = self.current_word.get('mistakes', 0) + 1
+                    cv2.circle(img, finger_pos, 25, (0, 0, 255), 3)
+                    draw_text(img, "WRONG!", (finger_pos[0] - 25, finger_pos[1] - 40), (0, 0, 255), 0.6, 2)
                 self.dragging = False
                 self.current_word = None
             
@@ -340,11 +376,23 @@ class DragDropGame:
                 # Draw connection line from original position
                 orig_center = self.current_word['center']
                 cv2.line(img, orig_center, drag_pos, (255, 255, 0), 2)
+                # Highlight nearest target and show guide line
+                nearest_idx, nearest_box, nearest_dist = self.get_nearest_target(drag_pos)
+                for ib in self.image_boxes:
+                    ib['highlight'] = False
+                if nearest_box and nearest_dist <= self.snap_radius:
+                    nearest_box['highlight'] = True
+                    cv2.line(img, drag_pos, nearest_box['center'], (0, 255, 255), 1)
         
         else:
             # No hand detected - show instruction
             h, w = img.shape[:2]
             draw_text(img, "Show your hand to the camera", (w//2 - 150, h//2), (255, 100, 100), 1.0, 2)
+        
+        # Clear highlights when not dragging
+        if not self.dragging:
+            for ib in self.image_boxes:
+                ib['highlight'] = False
 
 def game_drag_drop():
     print("[Game] Starting Drag-Drop Matching...")
@@ -646,8 +694,7 @@ def game_finger_count():
     cv2.destroyAllWindows()
     print(f"Game ended. Final score: {game.score}, Level reached: {game.level}")
 
-# Add the math import at the top of the file if not already present
-import math
+# math imported at top
 
 
 class Mosquito:

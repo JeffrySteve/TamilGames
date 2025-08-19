@@ -8,13 +8,8 @@ import cv2
 import numpy as np
 import traceback
 
-class SimpleButton(tk.Button):
-    def __init__(self, parent, text, command, bg_color="#4CAF50", **kwargs):
-        super().__init__(parent, text=text, command=command, 
-                        bg=bg_color, fg="white", font=("Arial", 12, "bold"),
-                        relief="raised", bd=3, **kwargs)
-import cv2
-import numpy as np
+# Toggle verbose debug logging here
+DEBUG = False
 
 class SimpleButton(tk.Button):
     def __init__(self, parent, text, command, bg_color="#4CAF50", **kwargs):
@@ -47,6 +42,108 @@ class TamilGamesGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         self.create_main_menu()
+
+    # --- Camera helpers ---
+    def _camera_is_black(self, frame):
+        try:
+            if frame is None or frame.size == 0:
+                return True
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return float(np.mean(gray)) < 8.0  # very dark/black threshold
+        except Exception:
+            return True
+
+    def _warmup_and_check(self, cap, frames=8):
+        last = None
+        for _ in range(frames):
+            ret, f = cap.read()
+            if not ret:
+                continue
+            last = f
+        return last, (last is not None and not self._camera_is_black(last))
+
+    def _init_camera(self, device_index, width, height, fps):
+        # Try DirectShow + MJPG at requested settings
+        def open_cap(backend=None):
+            try:
+                return cv2.VideoCapture(device_index, backend) if backend is not None else cv2.VideoCapture(device_index)
+            except Exception:
+                return cv2.VideoCapture(device_index)
+
+        tried = []
+
+        # 1) DSHOW + MJPG
+        cap = open_cap(cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        frame, ok = self._warmup_and_check(cap)
+        if ok:
+            if DEBUG:
+                print("Camera OK: DSHOW+MJPG")
+            return cap
+        tried.append("DSHOW+MJPG")
+
+        # 2) Enable auto exposure and retry on same cap
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # auto on (DirectShow convention)
+        cap.set(cv2.CAP_PROP_EXPOSURE, 0)  # reset
+        frame, ok = self._warmup_and_check(cap)
+        if ok:
+            if DEBUG:
+                print("Camera OK after auto-exposure: DSHOW+MJPG")
+            return cap
+        tried.append("auto-exp")
+
+        # 3) DSHOW without MJPG (default codec)
+        cap.release()
+        cap = open_cap(cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FOURCC, 0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        frame, ok = self._warmup_and_check(cap)
+        if ok:
+            if DEBUG:
+                print("Camera OK: DSHOW default codec")
+            return cap
+        tried.append("DSHOW+default")
+
+        # 4) Default backend
+        cap.release()
+        cap = open_cap(None)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        frame, ok = self._warmup_and_check(cap)
+        if ok:
+            if DEBUG:
+                print("Camera OK: default backend")
+            return cap
+        tried.append("default backend")
+
+        # 5) Safer baseline: 640x480 @ 30 FPS, default backend
+        cap.release()
+        cap = open_cap(None)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+        frame, ok = self._warmup_and_check(cap)
+        if ok:
+            if DEBUG:
+                print("Camera OK: baseline 640x480@30")
+            return cap
+        tried.append("baseline 640x480@30")
+
+        # Failed
+        cap.release()
+        print(f"❌ Camera initialization failed. Tried: {', '.join(tried)}")
+        return None
     
     def toggle_fullscreen(self, event=None):
         """Toggle between fullscreen and windowed mode"""
@@ -143,7 +240,6 @@ class TamilGamesGUI:
         # Footer with camera info and controls
         footer_frame = tk.Frame(main_frame, bg="#1e3c72")
         footer_frame.pack(side='bottom', pady=20)
-        footer_frame.pack(side='bottom', pady=20)
         
         camera_info = tk.Label(footer_frame, text=f"📹 Current Camera: Device {self.selected_camera}", 
                               font=("Arial", 10), fg="#CCCCCC", bg="#1e3c72")
@@ -188,7 +284,11 @@ class TamilGamesGUI:
         """Detect available camera devices"""
         available_cameras = []
         for i in range(5):  # Check first 5 camera indices
-            cap = cv2.VideoCapture(i)
+            # Prefer DirectShow backend on Windows for lower latency
+            try:
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            except Exception:
+                cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 ret, _ = cap.read()
                 if ret:
@@ -322,7 +422,15 @@ class TamilGamesGUI:
         close_btn.pack(side='right', padx=10)
         
         # Start camera preview
-        cap = cv2.VideoCapture(camera_index)
+        # Prefer DirectShow backend on Windows; configure for smooth preview
+        try:
+            cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        except Exception:
+            cap = cv2.VideoCapture(camera_index)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         preview_running = True
         
         def update_preview():
@@ -420,14 +528,6 @@ class TamilGamesGUI:
                                        font=("Arial", 9), fg="#CCCCCC", bg="#1e3c72")
             instruction_label.pack(side='right', padx=20, pady=10)
         
-        title_label = tk.Label(header_frame, text=title, 
-                              font=("Arial", 18, "bold"), fg="#FFD700", bg="#1e3c72")
-        title_label.pack(expand=True)
-        
-        back_btn = SimpleButton(header_frame, "🏠 Back to Menu", self.show_menu, 
-                               bg_color="#F44336", width=15)
-        back_btn.place(x=20, y=20)
-        
         return header_frame
     
     def run_drag_drop_game(self):
@@ -453,26 +553,14 @@ class TamilGamesGUI:
             self.show_error(f"Game module not found: {e}")
     
     def _drag_drop_thread(self):
-        cap = cv2.VideoCapture(self.selected_camera)  # Use selected camera
-        
-        # Anti-shutter camera settings for stable video
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Small buffer to prevent lag
-        
-        # Stabilize exposure and lighting for smooth video
-        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Disable auto-exposure
-        cap.set(cv2.CAP_PROP_EXPOSURE, -6)  # Fixed exposure
-        cap.set(cv2.CAP_PROP_BRIGHTNESS, 60)  # Stable brightness
-        cap.set(cv2.CAP_PROP_CONTRAST, 50)  # Moderate contrast
-        
-        # Enhanced camera warmup to prevent initial flicker
-        print("Starting camera with anti-shutter settings...")
-        for i in range(15):  # More warmup frames
-            ret, _ = cap.read()
-            import time
-            time.sleep(0.04)
+        # Robust camera open with fallbacks
+        cap = self._init_camera(self.selected_camera, 800, 600, 60)
+        if cap is None:
+            self.show_error("Camera failed to initialize. Try Camera Settings and a different device.")
+            self.game_running = False
+            if self.root.winfo_exists():
+                self.root.after(100, self.show_menu)
+            return
         
         # Frame smoothing variables for anti-shutter
         prev_frame = None
@@ -520,9 +608,9 @@ class TamilGamesGUI:
                     print(f"Canvas update error: {e}")
                     continue
                 
-                # Controlled frame rate for smooth video
+                # Controlled frame rate for smooth video (~50-60 FPS)
                 import time
-                time.sleep(0.025)  # ~40 FPS for smooth playback
+                time.sleep(0.018)
                 
                 if game.game_complete:
                     print("Game completed!")
@@ -570,13 +658,11 @@ class TamilGamesGUI:
             import cv2
             import time
             
-            cap = cv2.VideoCapture(self.selected_camera)  # Use selected camera
-            
-            # Basic camera settings - no filters
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Robust camera open with fallbacks
+            cap = self._init_camera(self.selected_camera, 800, 600, 60)
+            if cap is None:
+                self.show_error("Camera failed to initialize. Try Camera Settings and a different device.")
+                return
             
             # Simple camera warmup
             print("Starting camera...")
@@ -589,12 +675,21 @@ class TamilGamesGUI:
             
             print("Starting finger counting game...")
             
+            # Frame smoothing state
+            prev_frame = None
+            frame_alpha = 0.8
+
             while self.game_running and self.root.winfo_exists():
                 ret, img = cap.read()
                 if not ret or img is None:
                     continue
                 
-                # Simple mirror flip - no other processing
+                # Anti-shutter frame smoothing
+                if prev_frame is not None and prev_frame.shape == img.shape:
+                    img = cv2.addWeighted(img, frame_alpha, prev_frame, 1 - frame_alpha, 0)
+                prev_frame = img.copy()
+
+                # Simple mirror flip
                 img = cv2.flip(img, 1)
                 h, w = img.shape[:2]
                 
@@ -625,8 +720,8 @@ class TamilGamesGUI:
                     time.sleep(2)
                     break
                 
-                # Simple frame rate control
-                time.sleep(0.03)  # ~30 FPS
+                # Simple frame rate control (~50-60 FPS)
+                time.sleep(0.018)
                 
         except Exception as e:
             print(f"Error initializing finger count game: {e}")
@@ -673,13 +768,11 @@ class TamilGamesGUI:
             import cv2
             import time
             
-            cap = cv2.VideoCapture(self.selected_camera)  # Use selected camera
-            
-            # Basic camera settings - no filters
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Robust camera open with fallbacks
+            cap = self._init_camera(self.selected_camera, 800, 600, 60)
+            if cap is None:
+                self.show_error("Camera failed to initialize. Try Camera Settings and a different device.")
+                return
             
             # Simple camera warmup
             print("Starting camera...")
@@ -692,12 +785,21 @@ class TamilGamesGUI:
             
             print("Starting mosquito killing game...")
             
+            # Frame smoothing state
+            prev_frame = None
+            frame_alpha = 0.8
+
             while self.game_running and self.root.winfo_exists():
                 ret, img = cap.read()
                 if not ret or img is None:
                     continue
                 
-                # Simple mirror flip - no other processing
+                # Anti-shutter frame smoothing
+                if prev_frame is not None and prev_frame.shape == img.shape:
+                    img = cv2.addWeighted(img, frame_alpha, prev_frame, 1 - frame_alpha, 0)
+                prev_frame = img.copy()
+
+                # Simple mirror flip
                 img = cv2.flip(img, 1)
                 h, w = img.shape[:2]
                 
@@ -728,8 +830,8 @@ class TamilGamesGUI:
                     time.sleep(2)
                     break
                 
-                # Simple frame rate control
-                time.sleep(0.03)  # ~30 FPS
+                # Simple frame rate control (~50-60 FPS)
+                time.sleep(0.018)
                 
         except Exception as e:
             print(f"Error initializing mosquito kill game: {e}")
@@ -764,14 +866,16 @@ class TamilGamesGUI:
             
             # Debug: Print canvas dimensions (only first few times)
             if canvas_width <= 1 or canvas_height <= 1:
-                print(f"⚠️ Canvas not ready: {canvas_width}x{canvas_height}")
+                if DEBUG:
+                    print(f"⚠️ Canvas not ready: {canvas_width}x{canvas_height}")
                 # Try again later
                 self.root.after(10, lambda: self.update_canvas(img))
                 return
             
             # Validate image before processing
             if img is None or img.size == 0:
-                print("❌ Invalid image received for canvas update")
+                if DEBUG:
+                    print("❌ Invalid image received for canvas update")
                 return
             
             # Only print debug info occasionally
@@ -779,7 +883,7 @@ class TamilGamesGUI:
                 self._debug_counter = 0
             self._debug_counter += 1
             
-            if self._debug_counter % 100 == 1:  # Print every 100th frame
+            if DEBUG and self._debug_counter % 100 == 1:  # Print every 100th frame
                 print(f"📷 Canvas update: img={img.shape}, canvas={canvas_width}x{canvas_height}")
             
             # Convert BGR to RGB
@@ -817,7 +921,7 @@ class TamilGamesGUI:
             self.game_canvas.create_image(x_offset, y_offset, anchor=tk.NW, image=self.photo)
             
             # Only print success message occasionally
-            if self._debug_counter % 100 == 1:
+            if DEBUG and self._debug_counter % 100 == 1:
                 print("✅ Canvas updated successfully")
                 
         except ImportError:

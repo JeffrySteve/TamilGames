@@ -6,30 +6,33 @@ from collections import deque
 import math
 
 class HandTracker:
-    def __init__(self, max_hands=2, detection_confidence=0.6, tracking_confidence=0.7):
+    def __init__(self, max_hands=2, detection_confidence=0.6, tracking_confidence=0.7, processing_scale=0.75):
         self.mp_hands = mp.solutions.hands
-        
+
         # Optimized MediaPipe configuration for better detection
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=max_hands,
             min_detection_confidence=detection_confidence,  # Lowered for better detection
-            min_tracking_confidence=tracking_confidence,   # Lowered for better tracking
+            min_tracking_confidence=tracking_confidence,    # Lowered for better tracking
             model_complexity=0  # Use lighter model for better performance and stability
         )
-        
+
         self.mp_draw = mp.solutions.drawing_utils
-        
+
+        # Processing scale for performance (process smaller frame for speed)
+        self.processing_scale = max(0.5, min(1.0, processing_scale))
+
         # Enhanced smoothing and filtering
         self.landmark_history = deque(maxlen=3)  # Reduced for faster response
         self.finger_state_history = deque(maxlen=2)  # Faster finger state changes
         self.gesture_confidence_threshold = 0.5  # Lowered threshold
-        
+
         # Improved gesture stability
         self.last_gesture = None
         self.gesture_counter = 0
         self.gesture_stability_frames = 2  # Reduced for faster response
-        
+
         # Better position smoothing
         self.smoothed_landmarks = None
         self.smoothing_factor = 0.5  # Lighter smoothing for better responsiveness
@@ -37,13 +40,17 @@ class HandTracker:
     def find_hands(self, img, draw=True):
         # Enhanced preprocessing for better hand detection
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Apply slight Gaussian blur to reduce noise
+
+        # Optional slight Gaussian blur to reduce noise
         img_rgb = cv2.GaussianBlur(img_rgb, (3, 3), 0)
-        
-        # Process with MediaPipe
-        self.results = self.hands.process(img_rgb)
-        
+
+        # Downscale for processing to improve performance
+        if self.processing_scale < 1.0:
+            small = cv2.resize(img_rgb, None, fx=self.processing_scale, fy=self.processing_scale, interpolation=cv2.INTER_AREA)
+            self.results = self.hands.process(small)
+        else:
+            self.results = self.hands.process(img_rgb)
+
         if self.results.multi_hand_landmarks:
             for handLms in self.results.multi_hand_landmarks:
                 if draw:
@@ -53,17 +60,15 @@ class HandTracker:
                         self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=3, circle_radius=3),
                         self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2)
                     )
-                    
+
                     # Add hand detection confidence indicator
                     h, w, _ = img.shape
-                    cv2.putText(img, f"Hand Detected", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(img, f"Hand Detected", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         else:
-            # Show "No hands detected" message
-            h, w, _ = img.shape
-            cv2.putText(img, "Show your hands clearly", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
+            # No hands detected; avoid noisy console/UI text here
+            pass
+
         return img
 
     def get_landmarks(self, img):
@@ -83,37 +88,7 @@ class HandTracker:
         
         return landmarks
     
-    def get_all_landmarks(self, img):
-        """Get landmarks for all detected hands"""
-        all_landmarks = []
-        if self.results.multi_hand_landmarks:
-            for handLms in self.results.multi_hand_landmarks:
-                frame_landmarks = []
-                for id, lm in enumerate(handLms.landmark):
-                    h, w, c = img.shape
-                    cx, cy = int(lm.x * w), int(lm.y * h)
-                    frame_landmarks.append((id, cx, cy))
-                
-                # Apply smoothing
-                smoothed_landmarks = self.smooth_landmarks(frame_landmarks)
-                all_landmarks.append(smoothed_landmarks)
-        
-        return all_landmarks
-    
-    def count_all_fingers(self, img):
-        """Count fingers on all detected hands"""
-        all_landmarks = self.get_all_landmarks(img)
-        total_fingers = 0
-        hand_finger_counts = []
-        
-        for landmarks in all_landmarks:
-            finger_states = self.get_finger_states(landmarks)
-            if finger_states:
-                finger_count = sum(finger_states)
-                hand_finger_counts.append(finger_count)
-                total_fingers += finger_count
-        
-        return total_fingers, hand_finger_counts
+    # Removed earlier duplicate of get_all_landmarks/count_all_fingers to keep single, consistent implementations below
     
     def get_all_landmarks(self, img):
         """Get landmarks for all detected hands"""
