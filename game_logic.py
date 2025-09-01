@@ -23,10 +23,27 @@ class DragDropGame:
         self.hover_word = None
         self.hover_counter = 0
         self.dwell_frames_to_grab = 10  # frames required to grab
-        self.snap_radius = 60  # px radius to snap to nearest target
+        self.snap_radius = 45  # px radius to snap to nearest target
         self.highlight_target_idx = None
         self.drop_hover_counter = 0
         self.drop_dwell_frames = 6  # frames to confirm drop over a target
+        # New latched dragging state
+        self.drag_latched = False
+        self.last_finger_pos = None
+    
+    def _fit_text_scale(self, text, box_width, base_scale=1.0):
+        """Approximate a font scale so text fits within a given box width."""
+        try:
+            avg_char_px = 22.0  # conservative Tamil glyph width at scale 1.0
+            padding = 28.0
+            max_w = max(30.0, box_width - padding)
+            need = avg_char_px * max(1, len(text)) * base_scale
+            if need <= max_w:
+                return base_scale
+            scale = max(0.5, max_w / (avg_char_px * max(1, len(text))))
+            return min(base_scale, scale)
+        except Exception:
+            return max(0.5, min(1.0, base_scale))
         
     def load_words(self):
         try:
@@ -44,31 +61,62 @@ class DragDropGame:
     def setup_game(self, img_width, img_height):
         # Select 3 random words for this round
         selected_words = random.sample(self.words, min(3, len(self.words)))
-        
+
+        # Responsive vertical layout so all pairs fit, even on shorter windows
+        n = len(selected_words)
+        header_h = 120
+        footer_h = 100
+        top_margin = header_h + 10
+        bottom_margin = footer_h + 10
+        usable_h = max(100, img_height - (top_margin + bottom_margin))
+
+        base_w, base_h = 160, 60
+        min_gap = 16
+        # Compute scale if space is tight
+        needed_h = n * base_h + (n + 1) * min_gap
+        if usable_h < needed_h:
+            scale_y = max(0.65, usable_h / float(needed_h))
+            h_box = max(40, int(base_h * scale_y))
+            gap = max(8, int(min_gap * scale_y))
+        else:
+            h_box = base_h
+            # Distribute remaining space as gaps
+            gap = max(min_gap, int((usable_h - n * h_box) / (n + 1)))
+        w_box = base_w  # keep width constant for readability
+
+        # Precompute row Y positions
+        row_y = []
+        cur_y = top_margin + gap
+        for _ in range(n):
+            row_y.append(cur_y)
+            cur_y += h_box + gap
+
         # Setup word boxes (left side)
         self.word_boxes = []
         for i, word in enumerate(selected_words):
-            y = 150 + i * 120
+            y = row_y[i]
+            x = 50
             box = {
                 'word': word,
-                'rect': (50, y, 200, 80),
-                'center': (150, y + 40),
+                'rect': (x, y, w_box, h_box),
+                'center': (x + w_box // 2, y + h_box // 2),
                 'matched': False,
                 'mistakes': 0
             }
             self.word_boxes.append(box)
-        
+
         # Setup image boxes (right side) - shuffled
         self.image_boxes = []
         shuffled_words = selected_words.copy()
         random.shuffle(shuffled_words)
-        
+
         for i, word in enumerate(shuffled_words):
-            y = 150 + i * 120
+            y = row_y[i]
+            x = img_width - (w_box + 50)
             box = {
                 'word': word,
-                'rect': (img_width - 250, y, 200, 80),
-                'center': (img_width - 150, y + 40),
+                'rect': (x, y, w_box, h_box),
+                'center': (x + w_box // 2, y + h_box // 2),
                 'matched': False,
                 'highlight': False
             }
@@ -76,158 +124,133 @@ class DragDropGame:
     
     def draw_game_ui(self, img):
         h, w = img.shape[:2]
-        
-        # Create semi-transparent overlay for better readability
+
+        # Header overlay
         overlay = img.copy()
-        
-        # Draw header background
         cv2.rectangle(overlay, (0, 0), (w, 120), (30, 30, 30), -1)
         cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
-        
-        # Draw title with shadow effect
-        draw_text(img, "Tamil Drag-Drop Game", (w//2 - 148, 52), (0, 0, 0), 1.4, 4)  # Shadow
-        draw_text(img, "Tamil Drag-Drop Game", (w//2 - 150, 50), (255, 215, 0), 1.4, 3)  # Gold title
-        
-        # Draw score and progress
+
+        # Title
+        draw_text(img, "Tamil Drag-Drop Game", (w//2 - 148, 52), (0, 0, 0), 1.4, 4)
+        draw_text(img, "Tamil Drag-Drop Game", (w//2 - 150, 50), (255, 215, 0), 1.4, 3)
+
+        # Score and progress
         progress = f"{self.matches_made}/{len(self.word_boxes)}"
         draw_text(img, f"Score: {self.score}", (50, 90), (255, 255, 255), 1.0, 2)
         draw_text(img, f"Progress: {progress}", (w - 200, 90), (255, 255, 255), 1.0, 2)
-        
-        # Draw Tamil words section header
-        draw_text(img, "Tamil Words", (50, 130), (255, 200, 100), 0.8, 2)
-        draw_text(img, "Match words", (w - 250, 130), (255, 200, 100), 0.8, 2)
-        
-        # Draw word boxes with enhanced styling
+
+        # Section headers
+        draw_text(img, "English Words", (50, 130), (255, 200, 100), 0.8, 2)
+        draw_text(img, "Match Tamil", (w - 250, 130), (255, 200, 100), 0.8, 2)
+
+        # Left: English words
         for i, box in enumerate(self.word_boxes):
             x, y, w_box, h_box = box['rect']
-            
             if box['matched']:
-                # Green gradient for matched boxes
                 color = (50, 255, 50)
-                bg_color = (0, 80, 0)
+                bg = (0, 80, 0)
             else:
-                # Blue gradient for unmatched boxes
                 color = (255, 255, 255)
-                bg_color = (40, 40, 100)
-            
-            # Draw background with rounded corners effect
-            cv2.rectangle(img, (x-2, y-2), (x + w_box + 2, y + h_box + 2), (0, 0, 0), -1)  # Shadow
-            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), bg_color, -1)  # Background
-            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), color, 3)  # Border
-            
+                bg = (40, 40, 100)
+            cv2.rectangle(img, (x-2, y-2), (x + w_box + 2, y + h_box + 2), (0, 0, 0), -1)
+            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), bg, -1)
+            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), color, 3)
             if not box['matched']:
-                # Draw Tamil word with larger font
-                draw_text(img, box['word']['tamil'], (x + 15, y + 35), (255, 255, 255), 1.2, 3)
-                
-                # Add number indicator
-                cv2.circle(img, (x + w_box - 20, y + 20), 15, color, -1)
-                draw_text(img, str(i+1), (x + w_box - 27, y + 28), (0, 0, 0), 0.6, 2)
-        
-        # Draw image boxes (target areas) with enhanced styling
+                txt_y = y + max(22, int(h_box * 0.62))
+                scale = self._fit_text_scale(box['word']['english'], w_box, 1.0)
+                draw_text(img, box['word']['english'], (x + 12, txt_y), (255, 255, 255), scale, 2)
+                bubble_r = 12 if h_box < 50 else 15
+                cv2.circle(img, (x + w_box - 20, y + 18), bubble_r, color, -1)
+                draw_text(img, str(i+1), (x + w_box - 27, y + 26), (0, 0, 0), 0.6, 2)
+
+        # Right: Tamil target boxes
         for i, box in enumerate(self.image_boxes):
             x, y, w_box, h_box = box['rect']
-            
             if box['matched']:
                 color = (50, 255, 50)
-                bg_color = (0, 80, 0)
-                icon = "✓"
+                bg = (0, 80, 0)
             else:
-                # Highlight nearest target when dragging
                 color = (0, 255, 255) if box.get('highlight', False) else (100, 150, 255)
-                bg_color = (50, 50, 80)
-                icon = "?"
-            
-            # Draw background with shadow
-            cv2.rectangle(img, (x-2, y-2), (x + w_box + 2, y + h_box + 2), (0, 0, 0), -1)  # Shadow
-            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), bg_color, -1)  # Background
-            
-            # Draw dashed border for unmatched, solid for matched
+                bg = (50, 50, 80)
+            cv2.rectangle(img, (x-2, y-2), (x + w_box + 2, y + h_box + 2), (0, 0, 0), -1)
+            cv2.rectangle(img, (x, y), (x + w_box, y + h_box), bg, -1)
             if box['matched']:
                 cv2.rectangle(img, (x, y), (x + w_box, y + h_box), color, 3)
             else:
-                # Dashed border effect
-                dash_length = 10
-                for pos in range(0, w_box, dash_length * 2):
-                    cv2.line(img, (x + pos, y), (x + min(pos + dash_length, w_box), y), color, 3)
-                    cv2.line(img, (x + pos, y + h_box), (x + min(pos + dash_length, w_box), y + h_box), color, 3)
-                for pos in range(0, h_box, dash_length * 2):
-                    cv2.line(img, (x, y + pos), (x, y + min(pos + dash_length, h_box)), color, 3)
-                    cv2.line(img, (x + w_box, y + pos), (x + w_box, y + min(pos + dash_length, h_box)), color, 3)
-            
+                dash = 10
+                for pos in range(0, w_box, dash * 2):
+                    cv2.line(img, (x + pos, y), (x + min(pos + dash, w_box), y), color, 3)
+                    cv2.line(img, (x + pos, y + h_box), (x + min(pos + dash, w_box), y + h_box), color, 3)
+                for pos in range(0, h_box, dash * 2):
+                    cv2.line(img, (x, y + pos), (x, y + min(pos + dash, h_box)), color, 3)
+                    cv2.line(img, (x + w_box, y + pos), (x + w_box, y + min(pos + dash, h_box)), color, 3)
             if not box['matched']:
-                # Draw target text
-                draw_text(img, "DROP HERE", (x + 45, y + 25), color, 0.7, 2)
-                draw_text(img, box['word']['tamil'], (x + 30, y + 55), (255, 255, 255), 0.9, 2)
+                drop_y = y + max(16, int(h_box * 0.32))
+                tamil_y = y + max(28, int(h_box * 0.75))
+                drop_scale = self._fit_text_scale("DROP HERE", w_box, 0.7)
+                word_scale = self._fit_text_scale(box['word']['tamil'], w_box, 0.9)
+                draw_text(img, "DROP HERE", (x + 12, drop_y), color, drop_scale, 2)
+                draw_text(img, box['word']['tamil'], (x + 12, tamil_y), (255, 255, 255), word_scale, 2)
             else:
-                # Draw checkmark for matched
                 draw_text(img, "MATCHED!", (x + 50, y + 30), color, 0.8, 2)
-                draw_text(img, box['word']['tamil'], (x + 30, y + 55), (200, 255, 200), 0.8, 2)
-        
-        # Draw enhanced instructions panel
+                word_scale = self._fit_text_scale(box['word']['tamil'], w_box, 0.8)
+                draw_text(img, box['word']['tamil'], (x + 12, y + max(28, int(h_box * 0.72))), (200, 255, 200), word_scale, 2)
+
+        # Instructions panel (no emoji)
         instruction_y = h - 100
-        cv2.rectangle(img, (0, instruction_y), (w, h), (20, 20, 20), -1)  # Dark background
-        cv2.rectangle(img, (0, instruction_y), (w, instruction_y + 5), (255, 215, 0), -1)  # Gold line
-        
+        cv2.rectangle(img, (0, instruction_y), (w, h), (20, 20, 20), -1)
+        cv2.rectangle(img, (0, instruction_y), (w, instruction_y + 5), (255, 215, 0), -1)
         draw_text(img, "CONTROLS:", (50, instruction_y + 25), (255, 215, 0), 0.7, 2)
-        draw_text(img, "👆 Point to navigate", (50, instruction_y + 45), (255, 255, 255), 0.6, 1)
-        draw_text(img, "✊ Close fist to grab", (250, instruction_y + 45), (255, 255, 255), 0.6, 1)
-        draw_text(img, "✋ Open hand to drop", (450, instruction_y + 45), (255, 255, 255), 0.6, 1)
-        draw_text(img, "Press 'Q' to quit", (650, instruction_y + 45), (255, 100, 100), 0.6, 1)
-        
+        draw_text(img, "Point to navigate", (50, instruction_y + 45), (255, 255, 255), 0.6, 1)
+        draw_text(img, "Pinch to pick", (250, instruction_y + 45), (255, 255, 255), 0.6, 1)
+        draw_text(img, "Move onto answer to drop", (450, instruction_y + 45), (255, 255, 255), 0.6, 1)
+        draw_text(img, "Press 'Q' to quit", (700, instruction_y + 45), (255, 100, 100), 0.6, 1)
+
         # Progress bar
-        bar_width = 300
-        bar_height = 20
+        bar_width, bar_height = 300, 20
         bar_x = w//2 - bar_width//2
         bar_y = instruction_y + 70
-        
-        # Background bar
         cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
-        
-        # Progress fill
-        progress_width = int((self.matches_made / len(self.word_boxes)) * bar_width)
+        progress_width = int((self.matches_made / max(1, len(self.word_boxes))) * bar_width)
         if progress_width > 0:
             cv2.rectangle(img, (bar_x, bar_y), (bar_x + progress_width, bar_y + bar_height), (0, 255, 0), -1)
-        
-        # Progress text
-        progress_text = f"{self.matches_made}/{len(self.word_boxes)} Matched"
-        draw_text(img, progress_text, (bar_x + bar_width//2 - 60, bar_y + 15), (255, 255, 255), 0.5, 1)
-        
-        # Game completion celebration
+        draw_text(img, f"{self.matches_made}/{len(self.word_boxes)} Matched", (bar_x + bar_width//2 - 60, bar_y + 15), (255, 255, 255), 0.5, 1)
+
+        # Completion overlay
         if self.game_complete:
-            # Create celebration overlay
-            celebration_overlay = img.copy()
-            cv2.rectangle(celebration_overlay, (0, 0), (w, h), (0, 0, 0), -1)
-            cv2.addWeighted(celebration_overlay, 0.6, img, 0.4, 0, img)
-            
-            # Animated text effect (simple version)
-            import time
-            colors = [(255, 0, 0), (255, 255, 0), (0, 255, 0), (0, 255, 255), (255, 0, 255)]
-            color_idx = int(time.time() * 3) % len(colors)
-            celebration_color = colors[color_idx]
-            
-            # Large celebration text
-            draw_text(img, "🎉 CONGRATULATIONS! 🎉", (w//2 - 250, h//2 - 50), celebration_color, 1.5, 4)
+            overlay2 = img.copy()
+            cv2.rectangle(overlay2, (0, 0), (w, h), (0, 0, 0), -1)
+            cv2.addWeighted(overlay2, 0.6, img, 0.4, 0, img)
+            draw_text(img, "CONGRATULATIONS!", (w//2 - 200, h//2 - 50), (0, 255, 255), 1.5, 4)
             draw_text(img, "All Words Matched Successfully!", (w//2 - 200, h//2), (255, 255, 255), 1.0, 2)
             draw_text(img, f"Final Score: {self.score} points", (w//2 - 120, h//2 + 40), (255, 215, 0), 1.0, 2)
             draw_text(img, "Press 'Q' to return to menu", (w//2 - 150, h//2 + 80), (200, 200, 200), 0.8, 2)
 
     def detect_finger_position(self, img):
+        """Return (index_tip_pos, is_pinching, confidence)."""
         landmarks = self.hand_tracker.get_landmarks(img)
         if not landmarks:
             return None, False, 0.0
-        
-        # Get confidence score for better stability
+
+        # Confidence estimate
         confidence = self.hand_tracker.get_gesture_confidence(landmarks)
-        
-        # Use improved finger tracking
+
+        # Index finger tip
         index_tip = self.hand_tracker.get_index_finger_tip(landmarks)
-        is_grabbing = self.hand_tracker.is_fist(landmarks)
-        
-        # Only return valid position if confidence is high enough
-        if confidence > 0.5 and index_tip:
-            return index_tip, is_grabbing, confidence
-        
-        return None, False, 0.0
+
+        # Pinch detection using pixel distance between thumb tip (4) and index tip (8)
+        thumb_tip = next((lm for lm in landmarks if lm[0] == 4), None)
+        idx_tip = next((lm for lm in landmarks if lm[0] == 8), None)
+        is_pinching = False
+        if thumb_tip and idx_tip:
+            h, w = img.shape[:2]
+            px_dist = math.hypot(thumb_tip[1] - idx_tip[1], thumb_tip[2] - idx_tip[2])
+            pinch_thresh = max(15, int(min(w, h) * 0.035))  # relative to frame size
+            is_pinching = px_dist < pinch_thresh
+
+        if index_tip and confidence > 0.4:
+            return index_tip, is_pinching, confidence
+        return None, False, confidence
     
     def check_word_collision(self, finger_pos):
         for box in self.word_boxes:
@@ -266,112 +289,80 @@ class DragDropGame:
         return best_idx, best_box, best_dist
     
     def handle_game_logic(self, img):
-        finger_pos, is_grabbing, confidence = self.detect_finger_position(img)
-        
-        if finger_pos and confidence > 0.6:  # Only show cursor if confident
+        finger_pos, is_pinching, confidence = self.detect_finger_position(img)
+
+        # Track last known position for stability when tracking drops briefly
+        if finger_pos is not None:
+            self.last_finger_pos = finger_pos
+
+        if (finger_pos or self.last_finger_pos) and confidence > 0.5:  # Only show cursor if confident
             # Enhanced finger position visualization with confidence
             confidence_color = int(255 * confidence)
             
-            if is_grabbing:
+            if is_pinching and not self.dragging:
                 # Grabbing state - red pulsing circle
                 import time
                 pulse = int(abs(np.sin(time.time() * 5)) * 15) + 10
-                cv2.circle(img, finger_pos, pulse, (0, 0, confidence_color), 3)
-                cv2.circle(img, finger_pos, 5, (255, 255, 255), -1)
-                draw_text(img, "GRABBING", (finger_pos[0] - 30, finger_pos[1] - 30), (0, 0, 255), 0.5, 2)
+                p = finger_pos if finger_pos else self.last_finger_pos
+                cv2.circle(img, p, pulse, (0, 0, confidence_color), 3)
+                cv2.circle(img, p, 5, (255, 255, 255), -1)
+                draw_text(img, "PINCH", (p[0] - 20, p[1] - 30), (0, 0, 255), 0.5, 2)
             else:
                 # Normal state - yellow circle with crosshair, opacity based on confidence
                 circle_color = (0, confidence_color, confidence_color)
-                cv2.circle(img, finger_pos, 15, circle_color, 2)
-                cv2.circle(img, finger_pos, 3, (255, 255, 255), -1)
+                p = finger_pos if finger_pos else self.last_finger_pos
+                cv2.circle(img, p, 15, circle_color, 2)
+                cv2.circle(img, p, 3, (255, 255, 255), -1)
                 # Crosshair
-                cv2.line(img, (finger_pos[0] - 10, finger_pos[1]), (finger_pos[0] + 10, finger_pos[1]), circle_color, 2)
-                cv2.line(img, (finger_pos[0], finger_pos[1] - 10), (finger_pos[0], finger_pos[1] + 10), circle_color, 2)
+                cv2.line(img, (p[0] - 10, p[1]), (p[0] + 10, p[1]), circle_color, 2)
+                cv2.line(img, (p[0], p[1] - 10), (p[0], p[1] + 10), circle_color, 2)
             
             # Display confidence
             draw_text(img, f"Confidence: {confidence:.1f}", (10, 30), (255, 255, 255), 0.5, 1)
             
-            # Dwell-to-grab: require sustained grab over a word box
+            # Pinch-to-pick with latched dragging
             if not self.dragging:
-                word_box = self.check_word_collision(finger_pos)
-                if word_box and not word_box['matched'] and is_grabbing and confidence > 0.7:
-                    if self.hover_word is word_box:
-                        self.hover_counter += 1
-                    else:
-                        self.hover_word = word_box
-                        self.hover_counter = 1
-                    # Visual dwell indicator
-                    cv2.circle(img, finger_pos, 20 + min(self.hover_counter, 10), (0, 180, 0), 2)
-                    if self.hover_counter >= self.dwell_frames_to_grab:
+                p = finger_pos if finger_pos else self.last_finger_pos
+                if p:
+                    word_box = self.check_word_collision(p)
+                    if word_box and not word_box['matched'] and is_pinching and confidence > 0.6:
+                        # Latch drag until correct drop
                         self.current_word = word_box
                         self.dragging = True
-                        self.drag_offset = (finger_pos[0] - word_box['center'][0], 
-                                          finger_pos[1] - word_box['center'][1])
-                        self.hover_word = None
-                        self.hover_counter = 0
-                else:
-                    self.hover_word = None
-                    self.hover_counter = 0
-            
-            elif not is_grabbing and self.dragging:
-                # Release: snap to nearest target if within radius, then validate
-                nearest_idx, nearest_box, nearest_dist = self.get_nearest_target(finger_pos)
-                if nearest_box and nearest_dist <= self.snap_radius:
-                    image_box = nearest_box
-                else:
-                    image_box = self.check_image_collision(finger_pos)
-
-                if image_box and self.check_match(self.current_word, image_box):
-                    self.current_word['matched'] = True
-                    image_box['matched'] = True
-                    self.score += 10
-                    self.matches_made += 1
-                    # Success visual effect
-                    for i in range(3):
-                        cv2.circle(img, image_box['center'], 30 + i*10, (0, 255, 0), 3)
-                    try:
-                        play_sound(f"Correct! {self.current_word['word']['tamil']}")
-                    except:
-                        print(f"Correct! {self.current_word['word']['tamil']}")
-                    if self.matches_made >= len(self.word_boxes):
-                        self.game_complete = True
-                        try:
-                            play_sound("Congratulations! You matched all words!")
-                        except:
-                            print("Game Complete!")
-                else:
-                    # Failed match: feedback and track mistakes
-                    if self.current_word is not None:
-                        self.current_word['mistakes'] = self.current_word.get('mistakes', 0) + 1
-                    cv2.circle(img, finger_pos, 25, (0, 0, 255), 3)
-                    draw_text(img, "WRONG!", (finger_pos[0] - 25, finger_pos[1] - 40), (0, 0, 255), 0.6, 2)
-                self.dragging = False
-                self.current_word = None
+                        self.drag_latched = True
+                        self.drag_offset = (p[0] - word_box['center'][0], p[1] - word_box['center'][1])
+                        # Visual feedback
+                        cv2.circle(img, p, 25, (0, 255, 0), 2)
             
             # Draw dragged word with enhanced visuals
             if self.dragging and self.current_word:
-                drag_pos = (finger_pos[0] - self.drag_offset[0], 
-                           finger_pos[1] - self.drag_offset[1])
+                p = finger_pos if finger_pos else self.last_finger_pos
+                if not p:
+                    # No tracking; keep original center as a fallback
+                    p = self.current_word['center']
+                drag_pos = (p[0] - self.drag_offset[0], p[1] - self.drag_offset[1])
                 
-                # Shadow effect
-                cv2.rectangle(img, 
-                            (drag_pos[0] - 102, drag_pos[1] - 42),
-                            (drag_pos[0] + 102, drag_pos[1] + 42),
-                            (0, 0, 0), -1)
-                
-                # Main dragged box with glow effect
-                cv2.rectangle(img, 
-                            (drag_pos[0] - 100, drag_pos[1] - 40),
-                            (drag_pos[0] + 100, drag_pos[1] + 40),
-                            (255, 255, 0), -1)
-                cv2.rectangle(img, 
-                            (drag_pos[0] - 100, drag_pos[1] - 40),
-                            (drag_pos[0] + 100, drag_pos[1] + 40),
-                            (255, 255, 255), 3)
-                
-                # Dragged text
-                draw_text(img, self.current_word['word']['tamil'], 
-                         (drag_pos[0] - 80, drag_pos[1] - 10), (0, 0, 0), 1.0, 3)
+                # Shadow effect (adjusted for smaller box 160x60)
+                cv2.rectangle(img,
+                              (drag_pos[0] - 82, drag_pos[1] - 32),
+                              (drag_pos[0] + 82, drag_pos[1] + 32),
+                              (0, 0, 0), -1)
+
+                # Main dragged box with glow effect (160x60)
+                cv2.rectangle(img,
+                              (drag_pos[0] - 80, drag_pos[1] - 30),
+                              (drag_pos[0] + 80, drag_pos[1] + 30),
+                              (255, 255, 0), -1)
+                cv2.rectangle(img,
+                              (drag_pos[0] - 80, drag_pos[1] - 30),
+                              (drag_pos[0] + 80, drag_pos[1] + 30),
+                              (255, 255, 255), 3)
+
+                # Dragged text (English on left side), fit to 160x60 box
+                drag_text = self.current_word['word']['english']
+                drag_scale = self._fit_text_scale(drag_text, 160 - 24, 1.0)
+                draw_text(img, drag_text,
+                          (drag_pos[0] - 80 + 12, drag_pos[1] + 6), (0, 0, 0), drag_scale, 3)
                 
                 # Draw connection line from original position
                 orig_center = self.current_word['center']
@@ -383,6 +374,33 @@ class DragDropGame:
                 if nearest_box and nearest_dist <= self.snap_radius:
                     nearest_box['highlight'] = True
                     cv2.line(img, drag_pos, nearest_box['center'], (0, 255, 255), 1)
+                    # Auto-drop only if it's the correct target
+                    if self.check_match(self.current_word, nearest_box):
+                        # Perform drop and scoring
+                        self.current_word['matched'] = True
+                        nearest_box['matched'] = True
+                        self.score += 10
+                        self.matches_made += 1
+                        # Success visuals
+                        for i in range(3):
+                            cv2.circle(img, nearest_box['center'], 30 + i*10, (0, 255, 0), 3)
+                        try:
+                            play_sound(f"Correct! {self.current_word['word']['tamil']}")
+                        except:
+                            print(f"Correct! {self.current_word['word']['tamil']}")
+                        if self.matches_made >= len(self.word_boxes):
+                            self.game_complete = True
+                            try:
+                                play_sound("Congratulations! You matched all words!")
+                            except:
+                                print("Game Complete!")
+                        # Reset drag state after successful drop
+                        self.dragging = False
+                        self.drag_latched = False
+                        self.current_word = None
+                    else:
+                        # Indicate wrong target subtly
+                        draw_text(img, "Wrong target", (drag_pos[0] - 50, drag_pos[1] - 55), (0, 0, 255), 0.5, 1)
         
         else:
             # No hand detected - show instruction
@@ -468,6 +486,8 @@ class FingerCountGame:
         self.feedback_timer = 0
         self.feedback_message = ""
         self.feedback_color = (0, 255, 0)
+        self.feedback_started_at = 0.0
+        self.feedback_duration = 1.5  # seconds to fade out
         self.game_complete = False
         
         print(f"Tamil Finger Counting Game Started! Target: {self.current_target} ({self.tamil_numbers[self.current_target]})")
@@ -504,28 +524,22 @@ class FingerCountGame:
         draw_text(img, "Show fingers on BOTH hands for counting up to 10", (50, instruction_y + 25), (200, 200, 200), 0.7, 2)
         draw_text(img, "Press 'Q' to quit", (50, instruction_y + 50), (255, 100, 100), 0.6, 1)
         
-        # Show feedback message
-        if self.show_feedback and self.feedback_timer > 0:
-            # Create pulsing effect
-            pulse = int(50 + 50 * abs(math.sin(self.feedback_timer * 0.2)))
-            feedback_bg_color = (self.feedback_color[0]//4, self.feedback_color[1]//4, self.feedback_color[2]//4)
-            
-            # Feedback background
-            feedback_w = 400
-            feedback_h = 80
-            feedback_x = w//2 - feedback_w//2
-            feedback_y = h//2 - 100
-            
-            cv2.rectangle(img, (feedback_x, feedback_y), (feedback_x + feedback_w, feedback_y + feedback_h), 
-                         feedback_bg_color, -1)
-            cv2.rectangle(img, (feedback_x, feedback_y), (feedback_x + feedback_w, feedback_y + feedback_h), 
-                         self.feedback_color, 3)
-            
-            # Feedback text
-            draw_text(img, self.feedback_message, (feedback_x + 50, feedback_y + 35), self.feedback_color, 1.2, 3)
-            
-            self.feedback_timer -= 1
-            if self.feedback_timer <= 0:
+        # Show feedback message with 1.5s fade-out
+        if self.show_feedback:
+            import time
+            elapsed = time.time() - self.feedback_started_at
+            if elapsed <= self.feedback_duration:
+                alpha = max(0.0, 1.0 - (elapsed / self.feedback_duration))
+                overlay_fb = img.copy()
+                fb_w, fb_h = 420, 90
+                fb_x = w//2 - fb_w//2
+                fb_y = h//2 - 110
+                bg = (self.feedback_color[0]//6, self.feedback_color[1]//6, self.feedback_color[2]//6)
+                cv2.rectangle(overlay_fb, (fb_x, fb_y), (fb_x + fb_w, fb_y + fb_h), bg, -1)
+                cv2.rectangle(overlay_fb, (fb_x, fb_y), (fb_x + fb_w, fb_y + fb_h), self.feedback_color, 2)
+                draw_text(overlay_fb, self.feedback_message, (fb_x + 40, fb_y + 45), self.feedback_color, 1.2, 3)
+                cv2.addWeighted(overlay_fb, alpha, img, 1 - alpha, 0, img)
+            else:
                 self.show_feedback = False
         
         # Level indicator
@@ -540,7 +554,7 @@ class FingerCountGame:
             cv2.rectangle(completion_overlay, (0, 0), (w, h), (0, 0, 0), -1)
             cv2.addWeighted(completion_overlay, 0.6, img, 0.4, 0, img)
             
-            draw_text(img, "🎉 வாழ்த்துகள்! (Congratulations!) 🎉", (w//2 - 250, h//2 - 50), (255, 215, 0), 1.5, 4)
+            draw_text(img, "🎉 வாழ்த்துகள்! 🎉", (w//2 - 250, h//2 - 50), (255, 215, 0), 1.5, 4)
             draw_text(img, "Finger Counting Master!", (w//2 - 150, h//2), (255, 255, 255), 1.0, 2)
             draw_text(img, f"Final Score: {self.score} points", (w//2 - 120, h//2 + 40), (255, 215, 0), 1.0, 2)
             draw_text(img, "Press 'Q' to return to menu", (w//2 - 150, h//2 + 80), (200, 200, 200), 0.8, 2)
@@ -591,11 +605,12 @@ class FingerCountGame:
                     if current_time - self.last_correct_time > 2:  # Prevent rapid scoring
                         self.score += 10 * self.level  # Higher score for higher levels
                         
-                        # Show success feedback
-                        self.feedback_message = "சரி! (Correct!)"
+                        # Show success feedback (fade out in 1.5s)
+                        self.feedback_message = "சரி!"
                         self.feedback_color = (0, 255, 0)
                         self.show_feedback = True
-                        self.feedback_timer = 60  # Show for 60 frames (~2 seconds)
+                        self.feedback_started_at = current_time
+                        self.feedback_duration = 1.5
                         
                         # Play success sound (if available)
                         try:
@@ -695,6 +710,192 @@ def game_finger_count():
     print(f"Game ended. Final score: {game.score}, Level reached: {game.level}")
 
 # math imported at top
+
+
+class ColorRecognitionGame:
+    """Color Recognition Game - Show a target color; user points at that color in camera view"""
+
+    def __init__(self):
+        self.hand_tracker = HandTracker(max_hands=1, detection_confidence=0.7, tracking_confidence=0.7)
+        # HSV ranges for common colors (H:0-179, S/V:0-255)
+        # Each entry has one or more ranges to cover hue wrap (e.g., red)
+        self.color_ranges = [
+            {"name": "RED", "ranges": [((0, 120, 80), (10, 255, 255)), ((160, 120, 80), (179, 255, 255))], "bgr": (0, 0, 255)},
+            {"name": "GREEN", "ranges": [((35, 80, 80), (85, 255, 255))], "bgr": (0, 200, 0)},
+            {"name": "BLUE", "ranges": [((90, 80, 80), (130, 255, 255))], "bgr": (255, 0, 0)},
+            {"name": "YELLOW", "ranges": [((20, 120, 120), (35, 255, 255))], "bgr": (0, 255, 255)},
+            {"name": "ORANGE", "ranges": [((10, 120, 120), (20, 255, 255))], "bgr": (0, 165, 255)},
+            {"name": "PURPLE", "ranges": [((130, 60, 60), (160, 255, 255))], "bgr": (255, 0, 255)},
+        ]
+
+        import random
+        self.target = random.choice(self.color_ranges)
+        self.score = 0
+        self.rounds_done = 0
+        self.total_rounds = 6
+        self.stable_frames = 0
+        self.required_stable_frames = 15
+        self.show_feedback = False
+        self.feedback_message = ""
+        self.feedback_color = (0, 255, 0)
+        self.feedback_started_at = 0.0
+        self.feedback_duration = 1.5
+        self.game_complete = False
+
+    def setup_game(self, img_w, img_h):
+        self.img_w = img_w
+        self.img_h = img_h
+
+    def _matches_target(self, hsv_pixel):
+        h, s, v = int(hsv_pixel[0]), int(hsv_pixel[1]), int(hsv_pixel[2])
+        for low, high in self.target["ranges"]:
+            (lh, ls, lv), (hh, hs, hv) = low, high
+            if lh <= h <= hh and ls <= s <= hs and lv <= v <= hv:
+                return True
+        return False
+
+    def _choose_next_target(self):
+        import random
+        # Avoid repeating same target back-to-back
+        options = [c for c in self.color_ranges if c["name"] != self.target["name"]]
+        self.target = random.choice(options) if options else random.choice(self.color_ranges)
+
+    def draw_game_ui(self, img):
+        h, w = img.shape[:2]
+        # Header
+        header = img.copy()
+        cv2.rectangle(header, (0, 0), (w, 110), (25, 35, 55), -1)
+        cv2.addWeighted(header, 0.8, img, 0.2, 0, img)
+        draw_text(img, "Color Recognition Game", (w//2 - 180, 35), (255, 215, 0), 1.2, 3)
+
+        # Target panel
+        draw_text(img, f"Find: {self.target['name']}", (50, 80), (255, 255, 255), 0.9, 2)
+        cv2.rectangle(img, (200, 52), (260, 92), self.target["bgr"], -1)
+        draw_text(img, f"Score: {self.score}", (w - 220, 60), (255, 255, 255), 0.8, 2)
+        draw_text(img, f"Round: {self.rounds_done}/{self.total_rounds}", (w - 260, 85), (255, 255, 255), 0.7, 1)
+
+        # Instructions footer
+        footer_y = h - 80
+        cv2.rectangle(img, (0, footer_y), (w, h), (30, 30, 30), -1)
+        draw_text(img, "Point your index finger at something that matches the color", (50, footer_y + 25), (200, 200, 200), 0.7, 2)
+        draw_text(img, "Press 'Q' to quit", (50, footer_y + 50), (255, 100, 100), 0.6, 1)
+
+        # Feedback fade overlay
+        if self.show_feedback:
+            import time
+            elapsed = time.time() - self.feedback_started_at
+            if elapsed <= self.feedback_duration:
+                alpha = max(0.0, 1.0 - (elapsed / self.feedback_duration))
+                ov = img.copy()
+                panel_w, panel_h = 480, 90
+                px = w//2 - panel_w//2
+                py = h//2 - 120
+                bg = (self.feedback_color[0]//6, self.feedback_color[1]//6, self.feedback_color[2]//6)
+                cv2.rectangle(ov, (px, py), (px + panel_w, py + panel_h), bg, -1)
+                cv2.rectangle(ov, (px, py), (px + panel_w, py + panel_h), self.feedback_color, 2)
+                draw_text(ov, self.feedback_message, (px + 30, py + 45), self.feedback_color, 1.0, 3)
+                cv2.addWeighted(ov, alpha, img, 1 - alpha, 0, img)
+            else:
+                self.show_feedback = False
+
+        # Completion overlay
+        if self.game_complete:
+            ov2 = img.copy()
+            cv2.rectangle(ov2, (0, 0), (w, h), (0, 0, 0), -1)
+            cv2.addWeighted(ov2, 0.6, img, 0.4, 0, img)
+            draw_text(img, "Great job!", (w//2 - 100, h//2 - 40), (0, 255, 255), 1.2, 3)
+            draw_text(img, f"Final Score: {self.score}", (w//2 - 120, h//2), (255, 255, 255), 1.0, 2)
+            draw_text(img, "Press 'Q' to return to menu", (w//2 - 150, h//2 + 40), (200, 200, 200), 0.8, 2)
+
+    def handle_game_logic(self, img):
+        if self.game_complete:
+            return
+        h, w = img.shape[:2]
+
+        # Draw target color mask softly (optional visual aid)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask_total = None
+        for low, high in self.target["ranges"]:
+            m = cv2.inRange(hsv, low, high)
+            mask_total = m if mask_total is None else cv2.bitwise_or(mask_total, m)
+        if mask_total is not None:
+            mask_blur = cv2.GaussianBlur(mask_total, (21, 21), 0)
+            colored = (np.dstack([mask_blur]*3) // 255) * np.array(self.target["bgr"], dtype=np.uint8)
+            img[:] = cv2.addWeighted(img, 1.0, colored, 0.15, 0)
+        # Use index finger tip as pointer (hand landmarks already computed in caller via find_hands)
+        # Here we only extract landmarks from existing results without re-running detection
+        landmarks = self.hand_tracker.get_landmarks(img)
+        p = self.hand_tracker.get_index_finger_tip(landmarks)
+        if p is not None:
+            x, y = int(p[0]), int(p[1])
+            cv2.circle(img, (x, y), 8, (0, 255, 255), -1)
+            # Sample local average color around pointer to reduce noise
+            x0, y0 = max(0, x - 4), max(0, y - 4)
+            x1, y1 = min(w - 1, x + 4), min(h - 1, y + 4)
+            patch = img[y0:y1 + 1, x0:x1 + 1]
+            if patch.size > 0:
+                hsv_px = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+                mean_hsv = hsv_px.reshape(-1, 3).mean(axis=0)
+                if self._matches_target(mean_hsv):
+                    self.stable_frames += 1
+                    cv2.putText(img, "MATCH", (x + 12, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                else:
+                    self.stable_frames = max(0, self.stable_frames - 2)
+        else:
+            # No hand
+            self.stable_frames = max(0, self.stable_frames - 1)
+
+        # Success condition
+        if self.stable_frames >= self.required_stable_frames:
+            import time
+            self.score += 10
+            self.rounds_done += 1
+            self.feedback_message = f"Correct! That's {self.target['name']}"
+            self.feedback_color = (0, 255, 0)
+            self.show_feedback = True
+            self.feedback_started_at = time.time()
+            self.feedback_duration = 1.5
+            self.stable_frames = 0
+            if self.rounds_done >= self.total_rounds:
+                self.game_complete = True
+            else:
+                self._choose_next_target()
+
+def game_color_recognition():
+    print("[Game] Starting Color Recognition...")
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    for _ in range(8):
+        cap.read()
+    game = ColorRecognitionGame()
+    prev = None
+    alpha = 0.75
+    init = False
+    while True:
+        ret, img = cap.read()
+        if not ret or img is None:
+            continue
+        if prev is not None and prev.shape == img.shape:
+            img = cv2.addWeighted(img, alpha, prev, 1-alpha, 0)
+        prev = img.copy()
+        img = cv2.flip(img, 1)
+        h, w = img.shape[:2]
+        if not init:
+            game.setup_game(w, h)
+            init = True
+        img = game.hand_tracker.find_hands(img, draw=True)
+        game.handle_game_logic(img)
+        game.draw_game_ui(img)
+        cv2.imshow("Color Recognition Game", img)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or game.game_complete:
+            if game.game_complete:
+                cv2.waitKey(2000)
+            break
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 class Mosquito:

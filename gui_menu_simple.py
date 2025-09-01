@@ -23,10 +23,15 @@ class TamilGamesGUI:
         self.root.title("Tamil Kids Learning Games")
         
         # Fullscreen support
-        self.is_fullscreen = False
+        self.is_fullscreen = True
         self.root.geometry("900x700")  # Increased default size
         self.root.configure(bg="#1e3c72")
         self.root.resizable(True, True)  # Allow resizing
+        # Apply fullscreen at startup
+        try:
+            self.root.attributes('-fullscreen', True)
+        except Exception:
+            pass
         
         # Bind fullscreen toggle (F11 key)
         self.root.bind('<F11>', self.toggle_fullscreen)
@@ -275,7 +280,64 @@ class TamilGamesGUI:
         self.show_coming_soon("✍️ Air Tracing Letters")
     
     def start_color_game(self):
-        self.show_coming_soon("🎨 Color Recognition")
+        self.hide_menu()
+        self.create_game_header("🎨 Color Recognition")
+        game_frame = tk.Frame(self.root, bg="#000000")
+        game_frame.pack(fill='both', expand=True)
+        self.game_canvas = tk.Canvas(game_frame, bg="#000000")
+        self.game_canvas.pack(fill='both', expand=True)
+        self.root.update_idletasks()
+        self.game_running = True
+        self.root.after(100, lambda: threading.Thread(target=self._color_game_thread, daemon=True).start())
+
+    def _color_game_thread(self):
+        try:
+            from game_logic import ColorRecognitionGame
+            cap = self._init_camera(self.selected_camera, 800, 600, 60)
+            if cap is None:
+                self.show_error("Camera failed to initialize. Try Camera Settings and a different device.")
+                self.game_running = False
+                if self.root.winfo_exists():
+                    self.root.after(100, self.show_menu)
+                return
+            prev = None
+            alpha = 0.8
+            game = ColorRecognitionGame()
+            init = False
+            while self.game_running and self.root.winfo_exists():
+                ret, img = cap.read()
+                if not ret or img is None:
+                    continue
+                if prev is not None and prev.shape == img.shape:
+                    img = cv2.addWeighted(img, alpha, prev, 1-alpha, 0)
+                prev = img.copy()
+                img = cv2.flip(img, 1)
+                h, w = img.shape[:2]
+                if not init:
+                    game.setup_game(w, h)
+                    init = True
+                img = game.hand_tracker.find_hands(img, draw=True)
+                game.handle_game_logic(img)
+                game.draw_game_ui(img)
+                try:
+                    self.update_canvas(img)
+                except Exception:
+                    pass
+                if game.game_complete:
+                    self.game_running = False
+                    if self.root.winfo_exists():
+                        self.root.after(2000, self.show_menu)
+                    break
+                import time
+                time.sleep(0.02)
+        except Exception as e:
+            print(f"Color game error: {e}")
+        finally:
+            try:
+                cap.release()
+                cv2.destroyAllWindows()
+            except:
+                pass
     
     def start_number_game(self):
         self.show_coming_soon("🔢 Number Learning")

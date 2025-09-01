@@ -1,9 +1,19 @@
 {
   "words": [
-    {"tamil": "பூ", "english": "flower"},
-    {"tamil": "பால்", "english": "milk"},
-    {"tamil": "நீர்", "english": "water"},
-    {"tamil": "சூரியன்", "english": "sun"},
-    {"tamil": "நிலா", "english": "moon"}
+    { "tamil": "பூ", "english": "flower" },
+    { "tamil": "பால்", "english": "milk" },
+    { "tamil": "நீர்", "english": "water" },
+    { "tamil": "சூரியன்", "english": "sun" },
+    { "tamil": "நிலா", "english": "moon" },
+    { "tamil": "மரம்", "english": "tree" },
+    { "tamil": "வானம்", "english": "sky" },
+    { "tamil": "நாய்", "english": "dog" },
+    { "tamil": "பூனை", "english": "cat" },
+    { "tamil": "மீன்", "english": "fish" },
+    { "tamil": "வீடு", "english": "house" },
+    { "tamil": "ஆப்பிள்", "english": "apple" },
+    { "tamil": "பந்து", "english": "ball" },
+    { "tamil": "நூல்", "english": "book" },
+    { "tamil": "மழை", "english": "rain" }
   ]
 }

@@ -8,6 +8,11 @@ def main():
         from gui_menu_simple import TamilGamesGUI
         print("🚀 Starting Tamil Kids Learning Games...")
         app = TamilGamesGUI()
+        # Start in fullscreen by default
+        try:
+            app.set_fullscreen_mode()
+        except Exception:
+            pass
         
         # Make sure the window is visible and focused
         app.root.lift()
